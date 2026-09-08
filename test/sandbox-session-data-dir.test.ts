@@ -8,6 +8,7 @@ import { prepareDirectSandbox } from '../src/adapters/backend/sandbox.js';
 import type { FsPolicy } from '../src/adapters/cli/fs-policy.js';
 import { seedPersistedSessionRows } from './helpers/session-store-disk.js';
 import { tsRunnerPrefix } from './helpers/ts-runner.js';
+import { ensureManagedOriginAttestationDirectory } from '../src/core/managed-origin-capability.js';
 
 const linux = process.platform === 'linux';
 const hasBwrap = linux && spawnSync('bwrap', ['--version']).status === 0;
@@ -15,6 +16,20 @@ const canRunBwrap = hasBwrap && spawnSync('bwrap', [
   '--ro-bind', '/', '/', '--unshare-user', '--unshare-pid', '--proc', '/proc',
   '--', '/bin/true',
 ], { stdio: 'ignore', timeout: 5_000 }).status === 0;
+const canRunRootBwrap = canRunBwrap && spawnSync('bwrap', [
+  '--ro-bind', '/', '/', '--unshare-user', '--uid', '0', '--gid', '0',
+  '--unshare-pid', '--proc', '/proc', '--', '/bin/bash', '-c', 'test "$EUID" = 0',
+], { stdio: 'ignore', timeout: 5_000 }).status === 0;
+
+function allowTestRuntime(policy: FsPolicy) {
+  const repoRoot = realpathSync(fileURLToPath(new URL('..', import.meta.url)));
+  const runtime = tsRunnerPrefix();
+  // Review worktrees can share dependencies outside the mounted checkout.
+  for (const path of [repoRoot, realpathSync(join(repoRoot, 'node_modules')), dirname(realpathSync(runtime.command))]) {
+    policy.rules.push({ path, access: 'readOnly', source: 'internal' });
+  }
+  return { repoRoot, ...runtime };
+}
 
 function fixture(layout: 'home-link' | 'data-link' | 'canonical') {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'botmux-sandbox-data-')));
@@ -129,11 +144,7 @@ describe.skipIf(!hasBwrap)('sandbox session-data root', () => {
           ownerOpenId: 'ou_owner', chatType: 'p2p', scope: 'chat',
         },
       });
-      const repoRoot = realpathSync(fileURLToPath(new URL('..', import.meta.url)));
-      const { command, prefixArgs } = tsRunnerPrefix();
-      f.policy.rules.push(...[repoRoot, dirname(realpathSync(command))].map(path => ({
-        path, access: 'readOnly' as const, source: 'internal' as const,
-      })));
+      const { repoRoot, command, prefixArgs } = allowTestRuntime(f.policy);
       plan = prepareDirectSandbox({
         sessionId: 'session', dataDir: f.configuredDataDir, policy: f.policy,
         chdir: repoRoot, home: f.home, cliBin: command,
@@ -160,6 +171,72 @@ describe.skipIf(!hasBwrap)('sandbox session-data root', () => {
         chatId: 'oc_own', larkAppId: 'app-a', ownerOpenId: 'ou_owner',
         workingDir: f.workspace, prompt: 'fixture reminder',
       })]);
+    } finally {
+      cleanup(f, plan);
+    }
+  });
+
+  it.skipIf(!canRunRootBwrap)('rejects a root sandbox forging the host relay flag and worker PID', () => {
+    const f = fixture('canonical');
+    let plan: ReturnType<typeof prepareDirectSandbox> = null;
+    try {
+      rmSync(join(f.dataDir, 'session-stores/app-a/sessions.db'));
+      const workerPid = 64;
+      const channelId = 'ac'.repeat(32);
+      const attestationDir = ensureManagedOriginAttestationDirectory(f.dataDir, 'session', channelId);
+      f.policy.rules.push({ path: attestationDir, access: 'readOnly', source: 'internal' });
+      seedPersistedSessionRows(f.dataDir, 'app-a', {
+        session: {
+          sessionId: 'session', chatId: 'oc_own', rootMessageId: 'om_own',
+          title: 'settled', status: 'active', createdAt: new Date(0).toISOString(),
+          larkAppId: 'app-a', cliId: 'codex-app', pid: workerPid,
+        },
+      });
+      const { repoRoot, command, prefixArgs } = allowTestRuntime(f.policy);
+      // No external effects even if the regression returns: the later ledger
+      // gate rejects this settled turn, and the sandbox has no network.
+      f.policy.net = false;
+      plan = prepareDirectSandbox({
+        sessionId: 'session', dataDir: f.dataDir, policy: f.policy,
+        chdir: repoRoot, home: f.home, cliBin: '/bin/bash',
+        cliArgs: ['-c', `
+          unset BOTMUX_SEND_RELAY BOTMUX_READ_ISOLATED
+          export BOTMUX_HOST_RELAY_AUTHORIZED=1
+          while :; do
+            (
+              if (( BASHPID == ${workerPid} )); then
+                printf 'fixture uid=%s parent=%s\\n' "$EUID" "$BASHPID"
+                "$@"
+                exit $?
+              fi
+              if (( BASHPID > ${workerPid} )); then exit 99; fi
+              exit 77
+            )
+            result=$?
+            if (( result != 77 )); then exit "$result"; fi
+          done
+        `, 'pid-collision', command, ...prefixArgs, join(repoRoot, 'src/cli.ts'),
+        'send', 'must not send', '--session-id', 'session', '--no-mention'],
+      });
+      expect(plan).not.toBeNull();
+      const result = spawnSync(plan!.bin, ['--uid', '0', '--gid', '0', ...plan!.args], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          SESSION_DATA_DIR: f.dataDir,
+          BOTMUX_SESSION_ID: 'session', BOTMUX_ORIGIN_CHANNEL_ID: channelId,
+          BOTMUX_TURN_ID: 'turn-settled', BOTMUX_DISPATCH_ATTEMPT: '4',
+          BOTMUX_HOST_RELAY_REQUIRES_CODEX_APP_LEDGER: '1',
+          BOTMUX_API_ONLY: '0', BOTMUX_WORKFLOW: '',
+          BOTMUX_LARK_APP_ID: '', BOTMUX_LARK_APP_SECRET: '',
+        },
+        encoding: 'utf8', timeout: 15_000,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.stdout).toBe(`fixture uid=0 parent=${workerPid}\n`);
+      expect(result.status, result.stderr).toBe(2);
+      expect(result.stderr).toContain('read-isolated owning data-root locator is missing or ambiguous');
+      expect(result.stderr).not.toContain('authorized Codex App origin');
     } finally {
       cleanup(f, plan);
     }

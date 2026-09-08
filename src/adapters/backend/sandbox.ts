@@ -1225,6 +1225,11 @@ export function buildRelayHostEnv(
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...baseEnv };
   delete env.BOTMUX_SEND_RELAY;
+  // This channel locates the pane's read-isolation proof, not the host
+  // watcher's origin. Carrying it across re-exec misclassifies the host child
+  // as isolated. Durable origin still comes from authorize below; do not add
+  // a cmdSend exemption based on child-mutable env or namespace-local PIDs.
+  delete env.BOTMUX_ORIGIN_CHANNEL_ID;
   delete env.BOTMUX_CARD_PREPARED_CONTENT_FILE;
   delete env.BOTMUX_HOST_RELAY_REQUIRES_CODEX_APP_LEDGER;
   if (preparedContentFile) {
