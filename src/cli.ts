@@ -8122,10 +8122,22 @@ async function cmdSend(rest: string[]): Promise<void> {
   const kernelReadIsolationDetected = managedOriginLegacyIsolationProbeAccess(osUserHomeDir)
     === 'sandbox_denied'
     || managedOriginIsolationSentinelAccess(osUserHomeDir) === 'sandbox_denied';
+  const trustedHostRelay = process.env.BOTMUX_HOST_RELAY_AUTHORIZED === '1';
+  // The Linux outbox watcher re-execs on the host with the pane's origin
+  // channel intact. Verify its recorded worker parent before treating that
+  // inherited channel as evidence of read isolation; the env flag alone is
+  // never authority, and kernel/explicit isolation still takes precedence.
+  const parentBoundHostRelay = !relayDir && !kernelReadIsolationDetected
+    && trustedHostRelay && !!inheritedSessionId
+    && isTrustedVcMeetingHostRelayParent(
+      trustedHostRelay,
+      loadSessions().get(inheritedSessionId)?.pid,
+      process.ppid,
+    );
   const isolatedSendRequired = !relayDir
     && (kernelReadIsolationDetected
       || process.env.BOTMUX_READ_ISOLATED === '1'
-      || (!liveMarkerCtx?.sessionId && isolationMarkerPresent));
+      || (!liveMarkerCtx?.sessionId && isolationMarkerPresent && !parentBoundHostRelay));
   let isolatedBoundSessionId: string | undefined;
   if (isolatedSendRequired) {
     if (!inheritedOriginChannelId || !/^[a-f0-9]{64}$/.test(inheritedOriginChannelId)) {
@@ -8162,7 +8174,7 @@ async function cmdSend(rest: string[]): Promise<void> {
     process.env.SESSION_DATA_DIR = sendDataDir;
     liveMarkerCtx = findLiveAncestorSessionContext(sendDataDir);
   }
-  const isolatedCapabilityCtx = !isolatedSendRequired && liveMarkerCtx?.sessionId
+  const isolatedCapabilityCtx = !isolatedSendRequired && (liveMarkerCtx?.sessionId || parentBoundHostRelay)
     ? null
     : readWorkflowSessionRelayContext({
         env: process.env,
@@ -8180,7 +8192,6 @@ async function cmdSend(rest: string[]): Promise<void> {
   }
   let isolatedAttestationContext: ManagedOriginAttestationContext | undefined;
   let isolatedManagedOriginCtx: ManagedOriginAttestation | undefined;
-  const trustedHostRelay = process.env.BOTMUX_HOST_RELAY_AUTHORIZED === '1';
   const trustedRelayAttemptRaw = Number(process.env.BOTMUX_DISPATCH_ATTEMPT);
   const trustedRelayCandidate = trustedHostRelay && process.env.BOTMUX_SESSION_ID
     ? {

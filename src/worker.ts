@@ -14919,13 +14919,15 @@ async function spawnCli(
       }
     }
     if (process.platform === 'linux' && readIsolationOriginChannelId) {
+      // Match the canonical SESSION_DATA_DIR pinned by prepareDirectSandbox;
+      // the host's lexical symlink aliases do not exist in the fresh root.
       mandatoryReadOnlyPaths.push(managedOriginCapabilityDirectory(
-        isolationRuntimeDataDir,
+        canonical(isolationRuntimeDataDir),
         cfg.sessionId,
         readIsolationOriginChannelId,
       ));
       mandatoryReadOnlyPaths.push(managedOriginAttestationDirectory(
-        isolationRuntimeDataDir,
+        canonical(isolationRuntimeDataDir),
         cfg.sessionId,
         readIsolationOriginChannelId,
       ));
