@@ -217,6 +217,7 @@ import { fetchDaemonIpc, loadDaemonIpcSecret } from './core/daemon-ipc-auth.js';
 import { REPORT_SESSION_RELAY_ROUTE } from './core/report-session-relay.js';
 import { DISPATCH_REPORT_REGISTER_ROUTE } from './core/dispatch-report-binding.js';
 import { isRetryableAskHttpStatus } from './core/ask-types.js';
+import { linuxIsolationDetected } from './core/linux-isolation.js';
 import {
   hasManagedOriginIsolationMarker,
   isIsolatedCliProcess,
@@ -8152,8 +8153,9 @@ async function cmdSend(rest: string[]): Promise<void> {
   const replyLayoutRequest = parseReplyLayoutRequest(rest);
   if (replyLayoutRequest.warning) console.error(replyLayoutRequest.warning);
   let replyLayout = replyLayoutRequest.layout;
-  // Resolve isolation marker-first. A visible host marker always wins over a
-  // leftover capability. Linux bwrap keeps its host-execution outbox; macOS
+  // A kernel isolation stamp wins over process markers in a child-selected
+  // data root. Otherwise a visible host marker wins over a leftover capability.
+  // Linux bwrap keeps its host-execution outbox; macOS
   // read isolation instead challenges the owning daemon and trusts only the
   // matching host-written read-only proof sidecar. The capability file itself
   // may survive worker SIGKILL and is never direct-send authority.
@@ -8185,7 +8187,9 @@ async function cmdSend(rest: string[]): Promise<void> {
     console.error('botmux send refused: OS account home unavailable for isolation classification');
     process.exit(2);
   }
-  const kernelReadIsolationDetected = managedOriginLegacyIsolationProbeAccess(osUserHomeDir)
+  const linuxKernelIsolationDetected = linuxIsolationDetected();
+  const kernelReadIsolationDetected = linuxKernelIsolationDetected
+    || managedOriginLegacyIsolationProbeAccess(osUserHomeDir)
     === 'sandbox_denied'
     || managedOriginIsolationSentinelAccess(osUserHomeDir) === 'sandbox_denied';
   const isolatedSendRequired = !relayDir
@@ -8228,7 +8232,7 @@ async function cmdSend(rest: string[]): Promise<void> {
     process.env.SESSION_DATA_DIR = sendDataDir;
     liveMarkerCtx = findLiveAncestorSessionContext(sendDataDir);
   }
-  const isolatedCapabilityCtx = !isolatedSendRequired && liveMarkerCtx?.sessionId
+  const isolatedCapabilityCtx = !isolatedSendRequired && !linuxKernelIsolationDetected && liveMarkerCtx?.sessionId
     ? null
     : readWorkflowSessionRelayContext({
         env: process.env,
@@ -8236,7 +8240,7 @@ async function cmdSend(rest: string[]): Promise<void> {
         // Keep one marker snapshot for the whole decision. In particular, do
         // not let resolveSessionContext's protected-capability fallback get
         // mislabeled as a live process marker.
-        findMarker: () => isolatedSendRequired ? null : liveMarkerCtx,
+        findMarker: () => isolatedSendRequired || linuxKernelIsolationDetected ? null : liveMarkerCtx,
       });
   if (isolatedSendRequired
     && (isolatedCapabilityCtx?.sessionId !== isolatedBoundSessionId
@@ -8272,7 +8276,7 @@ async function cmdSend(rest: string[]): Promise<void> {
     await relaySend(rest, relayDir, replyLayout);
     return;
   }
-  if (relayDir && !liveMarkerCtx?.sessionId) {
+  if (relayDir && (linuxKernelIsolationDetected || !liveMarkerCtx?.sessionId)) {
     // The child may delete or replace its writable outbox capability, while
     // the immutable default snapshot remains visible. That snapshot is only a
     // routing hint and can survive worker death; never fall through to direct
