@@ -89,3 +89,18 @@ export function linuxIsolationLaunch(bin: string, args: string[]): { bin: string
     ],
   };
 }
+
+/** Lifecycle hint only, never isolation authority. The pipe adapter remains
+ * as a noninteractive shell while bwrap runs. Its fixed script never evaluates
+ * terminal input, so the worker must not mistake it for a failed interactive
+ * launch. Match the entire script, not just a forgeable argv[0] label; an rcfile
+ * trampoline or an unrelated shell must still hit the bare-shell input guard.
+ */
+export function isLinuxIsolationLauncher(commandLine: readonly string[]): boolean {
+  const launch = linuxIsolationLaunch('bwrap', []);
+  return commandLine[0] === launch.bin
+    && launch.args.slice(0, 3).every((arg, index) => commandLine[index + 1] === arg)
+    && !!commandLine[4]
+    && commandLine[5] === '--seccomp'
+    && commandLine[6] === '3';
+}

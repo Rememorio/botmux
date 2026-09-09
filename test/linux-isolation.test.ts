@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { linuxIsolationDetected, linuxIsolationLaunch } from '../src/core/linux-isolation.js';
+import { isLinuxIsolationLauncher, linuxIsolationDetected, linuxIsolationLaunch } from '../src/core/linux-isolation.js';
 import { prepareCredentialOnlySandbox } from '../src/adapters/backend/sandbox.js';
 import { tsEvalArgs, tsRunnerPrefix } from './helpers/ts-runner.js';
 import { readPersistedSessionRows, seedPersistedSessionRows } from './helpers/session-store-disk.js';
@@ -58,6 +58,20 @@ function evaluate(bytes: Buffer, arch: number, nr: number, which = 0, who = 1): 
 }
 
 describe.skipIf(!supported)('Linux isolation filter', () => {
+  it('recognizes only the fixed noninteractive launcher, never a bare shell or copied label', () => {
+    const launch = linuxIsolationLaunch('/usr/bin/bwrap', ['--', '/bin/true']);
+    const commandLine = [launch.bin, ...launch.args];
+    expect(isLinuxIsolationLauncher(commandLine)).toBe(true);
+    expect(isLinuxIsolationLauncher(['/bin/sh', '-i'])).toBe(false);
+    expect(isLinuxIsolationLauncher(['/bin/sh', '-c', 'exec /bin/sh -i', 'botmux-isolation'])).toBe(false);
+    const replacedScript = [...commandLine];
+    replacedScript[2] = 'read input; eval "$input"';
+    expect(isLinuxIsolationLauncher(replacedScript)).toBe(false);
+    const missingFilter = [...commandLine];
+    missingFilter[5] = '--ro-bind';
+    expect(isLinuxIsolationLauncher(missingFilter)).toBe(false);
+  });
+
   it.each([
     [0xc000003e, 140, 0], [0xc000003e, 140, 0x40000000],
     [0xc00000b7, 141, 0], [0x40000003, 96, 0], [0x40000028, 96, 0],
