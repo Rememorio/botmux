@@ -862,6 +862,7 @@ export function startExternalWriteWatcher(): void {
     ]),
   );
   let published = snapshot();
+  const announced = new Set(published.keys());
 
   try {
     // Watch the directory, not the file inode: every commit atomically replaces
@@ -880,13 +881,13 @@ export function startExternalWriteWatcher(): void {
           const previous = before.get(id);
           if (previous === serialized) continue;
           const row = JSON.parse(serialized) as Record<string, unknown>;
-          if (previous === undefined) {
+          if (!announced.has(id)) {
             dashboardEventBus.publish({ type: 'schedule.created', body: { schedule: row } });
           } else {
             // JSON omits undefined. Explicit nulls clear fields such as an old
             // error or thread bookmark in the dashboard's merge-based cache.
             const patch = { ...row };
-            for (const key of Object.keys(JSON.parse(previous))) {
+            for (const key of Object.keys(JSON.parse(previous ?? '{}'))) {
               if (!(key in row)) patch[key] = null;
             }
             dashboardEventBus.publish({ type: 'schedule.updated', body: { id, patch } });
@@ -899,6 +900,17 @@ export function startExternalWriteWatcher(): void {
         }
       } catch (err) {
         logger.debug(`[schedule-store] watch handler error: ${err}`);
+      }
+    });
+    // Dashboard mutations can announce a richer row before fs.watch runs.
+    // Reconcile it with an update, not another create that would replace its
+    // presentation metadata. Track lifecycle only: a partial eager update
+    // must not consume other committed fields still awaiting publication.
+    dashboardEventBus.subscribe(event => {
+      if (event.type === 'schedule.created' && stateFor(fp).tasks.has(event.body.schedule.id)) {
+        announced.add(event.body.schedule.id);
+      } else if (event.type === 'schedule.deleted') {
+        announced.delete(event.body.id);
       }
     });
     logger.info(`[schedule-store] Watching ${fp} for external writes`);

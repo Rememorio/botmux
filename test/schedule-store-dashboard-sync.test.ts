@@ -125,6 +125,22 @@ describe('schedule store → dashboard notifications', () => {
     expect(agg.getSchedules()).toEqual([]);
   });
 
+  it('preserves enriched rows already announced by the dashboard create endpoint', async () => {
+    const { store, agg, events, flush } = await setup();
+    const { dashboardEventBus } = await import('../src/core/dashboard-events.js');
+    const task = store.createTask({ ...params, id: 'dashboard-created' });
+    dashboardEventBus.publish({
+      type: 'schedule.created',
+      body: { schedule: { ...task, botName: 'Reporter', preconditionSource: 'inline' } },
+    });
+    store.updateTask(task.id, { enabled: false });
+    flush();
+    expect(agg.getSchedules().find(t => t.id === task.id)).toMatchObject({
+      botName: 'Reporter', preconditionSource: 'inline', enabled: false,
+    });
+    expect(events.filter(e => e.type === 'schedule.created')).toHaveLength(1);
+  });
+
   it('does not publish sibling bot changes', async () => {
     const { store, agg, events, flush } = await setup();
     store.createTask({ ...params, id: 'sibling', larkAppId: 'cli_schedule_sync_other' });
